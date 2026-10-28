@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ses Arama</title>
+<style>
+  body{font-family:system-ui;margin:0;padding:24px;background:#111;color:#eee}
+  input,select,button{width:100%;padding:14px;margin:8px 0;font-size:18px;border-radius:10px;border:0}
+  button{background:#2e7d32;color:#fff} button.stop{background:#c62828}
+  #st{margin-top:12px;color:#9e9e9e}
+</style>
+</head>
+<body>
+<h2>Ses Arama</h2>
+<input id="room" placeholder="Oda kodu (ikiniz aynı kodu girin)">
+<select id="voice">
+  <option value="male">Erkek sesi</option>
+  <option value="female">Kadın sesi</option>
+</select>
+<button id="go">Aramayı başlat</button>
+<div id="st">Hazır</div>
+
+<script>
+const $ = id => document.getElementById(id);
+let ctx, ws, stream;
+
+const CAPTURE = `
+class Cap extends AudioWorkletProcessor {
+  constructor(){ super(); this.buf = new Int16Array(640); this.n = 0; }
+  process(inputs){
+    const ch = inputs[0][0]; if(!ch) return true;
+    for (let i=0;i<ch.length;i++){
+      this.buf[this.n++] = Math.max(-1,Math.min(1,ch[i])) * 32767;
+      if (this.n === 640){ this.port.postMessage(this.buf.slice().buffer); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor('cap', Cap);
+class Play extends AudioWorkletProcessor {
+  constructor(){ super(); this.q = []; this.cur = null; this.pos = 0;
+    this.port.onmessage = e => { if (this.q.length < 10) this.q.push(e.data); }; }
+  process(_, outputs){
+    const out = outputs[0][0];
+    for (let i=0;i<out.length;i++){
+      if (!this.cur || this.pos >= this.cur.length){ this.cur = this.q.shift(); this.pos = 0; }
+      out[i] = this.cur ? this.cur[this.pos++] / 32768 : 0;
+    }
+    return true;
+  }
+}
+registerProcessor('play', Play);
+`;
+
+async function start(){
+  const room = $('room').value.trim();
+  if(!room){ $('st').textContent = 'Oda kodu girin'; return; }
+  stream = await navigator.mediaDevices.getUserMedia({
+    audio:{echoCancellation:true, noiseSuppression:true, channelCount:1}
+  });
+  ctx = new AudioContext({sampleRate:16000, latencyHint:'interactive'});
+  const url = URL.createObjectURL(new Blob([CAPTURE],{type:'application/javascript'}));
+  await ctx.audioWorklet.addModule(url);
+
+  const src = ctx.createMediaStreamSource(stream);
+  const cap = new AudioWorkletNode(ctx,'cap');
+  const play = new AudioWorkletNode(ctx,'play');
+  src.connect(cap);          // mikrofon -> sunucu (hoparlöre BAĞLI DEĞİL)
+  play.connect(ctx.destination);
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws/${encodeURIComponent(room)}?voice=${$('voice').value}`);
+  ws.binaryType = 'arraybuffer';
+  ws.onopen  = () => $('st').textContent = 'Bağlandı, karşı taraf bekleniyor / konuşuyorsunuz';
+  ws.onclose = () => stop();
+  ws.onmessage = e => play.port.postMessage(new Int16Array(e.data));
+  cap.port.onmessage = e => { if (ws.readyState === 1) ws.send(e.data); };
+
+  $('go').textContent = 'Aramayı bitir'; $('go').className = 'stop';
+}
+
+function stop(){
+  try{ ws && ws.close(); }catch{}
+  stream && stream.getTracks().forEach(t=>t.stop());
+  ctx && ctx.close();
+  ws = stream = ctx = null;
+  $('go').textContent = 'Aramayı başlat'; $('go').className = '';
+  $('st').textContent = 'Arama bitti';
+}
+
+$('go').onclick = () => (ctx ? stop() : start().catch(e => $('st').textContent = 'Hata: ' + e.message));
+</script>
+</body>
+</html>
